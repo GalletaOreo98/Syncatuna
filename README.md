@@ -1,8 +1,11 @@
 # Syncatuna
+<p align="center">
+<img src="icon.svg" width="200">  
+</p>
 
-Cliente/servidor CLI para sincronizar reproducción de audio y crar colas de reproducción entre varias máquinas usando `yt-dlp` y `mpv`.
+Cliente/servidor CLI para sincronizar reproducción de audio y crear colas de reproducción entre varias máquinas usando `yt-dlp` y `mpv`.
 
-> Versioón de prueba, tiene errores básdicos aún
+> Versioón de prueba, tiene errores básicos aún
 
 ## Instalación
 
