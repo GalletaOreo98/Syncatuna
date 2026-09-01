@@ -18,6 +18,7 @@ import subprocess
 import logging
 from dataclasses import dataclass, asdict
 from typing import Optional
+from urllib.parse import urlparse
 
 import websockets
 from websockets.asyncio.server import ServerConnection
@@ -25,15 +26,31 @@ from websockets.asyncio.server import ServerConnection
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("syncatuna-server")
 
-HOST = "0.0.0.0"
+############## CONFIG VARS ##############
+
+HOST = "127.0.0.1"
 WATCHDOG_INTERVAL = 2.0    # cada cuánto revisa si ya terminó la canción actual
 AUTO_ADVANCE_GRACE = 3.0
+
+MAX_QUEUE_SIZE = 100
+MAX_URL_LENGTH = 2048
+
+METADATA_CONCURRENCY = 2
+metadata_semaphore = asyncio.Semaphore(METADATA_CONCURRENCY)
+
+ALLOWED_HOSTS = {
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
+}
 
 
 def fetch_metadata(url: str) -> dict:
     try:
         result = subprocess.run(
-            ["yt-dlp", "-J", "--no-warnings", "--skip-download", "--no-playlist", url],
+            ["yt-dlp", "--ignore-config", "-J", "--no-warnings", "--skip-download", "--no-playlist", "--", url],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
@@ -48,6 +65,29 @@ def fetch_metadata(url: str) -> dict:
         log.warning("No se pudo obtener metadata de %s: %s", url, e)
         return {"title": url, "duration": 0.0}
         #return {"title": url, "duration": 0.0, "thumbnail": ""}
+
+
+def validate_url(url: str) -> bool:
+    if len(url) > MAX_URL_LENGTH:
+        return False
+
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+
+    if parsed.scheme not in ("http", "https"):
+        return False
+
+    hostname = (parsed.hostname or "").lower()
+
+    if hostname not in ALLOWED_HOSTS:
+        return False
+
+    if parsed.username is not None or parsed.password is not None:
+        return False
+
+    return True
 
 
 @dataclass
@@ -83,7 +123,6 @@ class Room:
         self.playing = playing
 
     def advance(self):
-        """Pasa a la siguiente canción de la cola (o se detiene si está vacía)."""
         if self.queue:
             self.current = self.queue.pop(0)
             self.set_anchor(0.0, True)
@@ -169,7 +208,16 @@ async def handler(ws: ServerConnection):
                 url = (msg.get("url") or "").strip()
                 if not url:
                     continue
-                meta = await asyncio.to_thread(fetch_metadata, url)
+                if len(room.queue) >= MAX_QUEUE_SIZE:
+                    log.warning("Cola llena; rechazando nueva URL")
+                    continue
+                if not validate_url(url):
+                    log.warning("URL rechazada: %r", url)
+                    continue
+                #meta = await asyncio.to_thread(fetch_metadata, url)
+                # Es como un semaforo para que no se sobrecargue de solicitudes de descarga de metadata al mismo tiempo
+                async with metadata_semaphore:
+                    meta = await asyncio.to_thread(fetch_metadata, url)
                 track = Track(
                     id=str(uuid.uuid4())[:8], url=url, title=meta["title"],
                     #duration=meta["duration"], thumbnail=meta["thumbnail"],
