@@ -9,7 +9,7 @@ import sys
 import client
 import server
 
-VERSION = "0.0.1"
+VERSION = "0.1.1"
 
 
 def build_parser() -> argparse.ArgumentParser:

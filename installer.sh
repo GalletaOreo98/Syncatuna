@@ -2,7 +2,7 @@
 set -eu
 
 APP_NAME="syncatuna"
-VERSION="0.1.0"
+VERSION="0.1.1"
 INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_NAME"
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 # Cambia esta URL si tu repositorio de Syncatuna tiene otro nombre/owner.

@@ -8,6 +8,7 @@ servidor.
 No reproduce audio: solo coordina a los clientes.
 
 """
+import os
 import asyncio
 import json
 import signal
@@ -19,6 +20,7 @@ import logging
 from dataclasses import dataclass, asdict
 from typing import Optional
 from urllib.parse import urlparse
+from pathlib import Path
 
 import websockets
 from websockets.asyncio.server import ServerConnection
@@ -46,12 +48,37 @@ ALLOWED_HOSTS = {
     "youtu.be",
 }
 
+YT_DLP_BASE_ARGS = [
+    "yt-dlp",
+    "--ignore-config",
+    "-J",
+    "--no-warnings",
+    "--skip-download",
+    "--no-playlist",
+]
+
+COOKIES_FILE = Path(
+    os.environ.get(
+        "SYNCATUNA_COOKIES",
+        "~/.config/syncatuna/cookies.txt",
+    )
+)
+
 
 def fetch_metadata(url: str) -> dict:
+    args = YT_DLP_BASE_ARGS.copy()
+
+    if COOKIES_FILE.is_file():
+        args += ["--cookies", str(COOKIES_FILE)]
+
+    args += ["--", url]
+    
     try:
         result = subprocess.run(
-            ["yt-dlp", "--ignore-config", "-J", "--no-warnings", "--skip-download", "--no-playlist", "--", url],
-            capture_output=True, text=True, timeout=30,
+            args,
+            capture_output=True, 
+            text=True, 
+            timeout=30,
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip()[:300])
