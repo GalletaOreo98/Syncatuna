@@ -305,6 +305,7 @@ async def main(argv=None):
 
     async with websockets.serve(handler, HOST, port, ping_interval=20, ping_timeout=20):
         log.info("Servidor Syncatuna escuchando en %s:%s (usa tu IP de VPN para que se conecten)", HOST, port)
+        log.info("Cookies file path: %s" , COOKIES_FILE)
         watchdog_task = asyncio.create_task(watchdog())
         await stop.wait()
         log.info("Cerrando servidor...")
