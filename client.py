@@ -143,8 +143,9 @@ class ClientState:
         self.anchor_position = 0.0
         self.anchor_time = 0.0
         self.users = []
-        self.clock_offset = 0.0  # server_time - local_time
+        self.clock_offset = 0.0
         self.loaded_track_id = "__none__"
+        self.loading_task = None
 
     def server_now(self) -> float:
         return time.time() + self.clock_offset
@@ -176,19 +177,44 @@ async def clock_sync_loop(ws):
         await asyncio.sleep(CLOCK_SYNC_INTERVAL)
 
 
-async def apply_new_track(mpv: MPV, url: str, target_position: float, should_play: bool):
-    """Carga la canción y espera a que mpv esté listo antes de buscar posición."""
-    await asyncio.to_thread(mpv.loadfile, url)
-    ready = False
-    for _ in range(100):
-        await asyncio.sleep(0.15)
-        ready = await asyncio.to_thread(mpv.is_ready)
-        if ready:
-            break
-    if ready:
-        live_target = state.expected_position() if should_play else target_position
+async def apply_new_track(mpv: MPV, track_id: str, url: str):
+    """Carga una pista y, cuando mpv esté listo, aplica el estado ACTUAL."""
+    try:
+        await asyncio.to_thread(mpv.loadfile, url)
+
+        ready = False
+
+        for _ in range(100):
+            await asyncio.sleep(0.15)
+
+            # Si mientras cargábamos cambió la canción, abandonamos
+            if not state.current or state.current["id"] != track_id:
+                return
+
+            ready = await asyncio.to_thread(mpv.is_ready)
+
+            if ready:
+                break
+
+        if not ready:
+            emit("No se pudo cargar la canción a tiempo")
+            return
+
+        # MUY IMPORTANTE:
+        # No usamos should_play ni target_position guardados del pasado.
+        # Consultamos el estado actual del servidor.
+        if not state.current or state.current["id"] != track_id:
+            return
+
+        state.loaded_track_id = track_id
+
+        live_target = state.expected_position()
+
         await asyncio.to_thread(mpv.seek_abs, live_target)
-        await asyncio.to_thread(mpv.set_pause, not should_play)
+        await asyncio.to_thread(mpv.set_pause, not state.playing)
+
+    except asyncio.CancelledError:
+        return
 
 
 DASHBOARD_WIDTH = 62
@@ -289,16 +315,39 @@ async def apply_state(msg, mpv: MPV):
     track_changed = new_id != state.loaded_track_id
 
     if track_changed:
-        state.loaded_track_id = new_id
+        # Cancelamos la carga anterior si todavía existe.
+        if state.loading_task and not state.loading_task.done():
+            state.loading_task.cancel()
+
         state.current = new_current
+        state.loaded_track_id = "__none__"
+
         if new_current:
-            asyncio.create_task(apply_new_track(mpv, new_current["url"], state.anchor_position, state.playing))
+            state.loading_task = asyncio.create_task(
+                apply_new_track(
+                    mpv,
+                    new_id,
+                    new_current["url"],
+                )
+            )
         else:
             await asyncio.to_thread(mpv.set_pause, True)
+
     else:
         state.current = new_current
-        await asyncio.to_thread(mpv.seek_abs, state.expected_position())
-        await asyncio.to_thread(mpv.set_pause, not state.playing)
+
+        # Si la pista todavía se está cargando, NO intentamos
+        # hacer seek/pause sobre ella todavía.
+        if state.loaded_track_id == new_id:
+            await asyncio.to_thread(
+                mpv.seek_abs,
+                state.expected_position()
+            )
+
+            await asyncio.to_thread(
+                mpv.set_pause,
+                not state.playing
+            )
 
     #nininini
     if track_changed or queue_changed or users_changed:

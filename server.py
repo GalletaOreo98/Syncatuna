@@ -34,6 +34,7 @@ HOST = "127.0.0.1"
 MAX_MSG_SIZE = 8192  # bytes por frame de websocket (los mensajes son chicos, no hace falta más)
 WATCHDOG_INTERVAL = 2.0    # cada cuánto revisa si ya terminó la canción actual
 AUTO_ADVANCE_GRACE = 3.0
+MANUAL_ADVANCE_GRACE = 3.0
 
 MAX_QUEUE_SIZE = 100
 MAX_URL_LENGTH = 2048
@@ -113,6 +114,7 @@ class Room:
         self.anchor_position: float = 0.0   # segundo del track en anchor_time
         self.anchor_time: float = time.time()
         self.clients: dict[ServerConnection, str] = {}
+        self.advance_in_progress = False
 
     def live_position(self) -> float:
         if not self.current:
@@ -164,31 +166,58 @@ async def broadcast():
         room.clients.pop(ws, None)
 
 
-async def advance_with_grace():
-    room.advance()
-    if room.current:
-        room.set_anchor(0.0, False)  # la dejamos cargada pero en pausa
-    await broadcast()
-
-    track_id = room.current.id if room.current else None
-    if track_id is None:
+async def advance_with_grace(grace: float, reason: str = "auto"):
+    if room.advance_in_progress:
         return
 
-    await asyncio.sleep(AUTO_ADVANCE_GRACE)
+    room.advance_in_progress = True
 
-    if room.current and room.current.id == track_id and not room.playing:
-        room.set_anchor(0.0, True)
-        log.info("Arrancando '%s' sincronizado para todos", room.current.title)
+    try:
+        room.advance()
+
+        if room.current:
+            room.set_anchor(0.0, False)
+
         await broadcast()
+
+        track_id = room.current.id if room.current else None
+
+        if track_id is None:
+            return
+
+        await asyncio.sleep(grace)
+
+        if room.current and room.current.id == track_id and not room.playing:
+            room.set_anchor(0.0, True)
+
+            log.info(
+                "Arrancando '%s' sincronizado para todos (%s, grace=%.1fs)",
+                room.current.title,
+                reason,
+                grace,
+            )
+
+            await broadcast()
+
+    finally:
+        room.advance_in_progress = False
 
 
 async def watchdog():
     while True:
         await asyncio.sleep(WATCHDOG_INTERVAL)
+
         if room.current and room.playing and room.current.duration > 0:
             if room.live_position() >= room.current.duration:
-                log.info("Fin de '%s' -> avanzando cola (con margen de sincronización)", room.current.title)
-                await advance_with_grace()
+                log.info(
+                    "Fin de '%s' -> avanzando cola (con margen de sincronización)",
+                    room.current.title,
+                )
+
+                await advance_with_grace(
+                    AUTO_ADVANCE_GRACE,
+                    reason="automático",
+                )
 
 
 async def handler(ws: ServerConnection):
@@ -249,11 +278,22 @@ async def handler(ws: ServerConnection):
                 await broadcast()
 
             elif mtype == "next":
-                room.advance()
                 who = room.clients.get(ws, name)
-                what = room.current.title if room.current else "(cola vacía)"
-                log.info("%s pidió next -> %s", who, what)
-                await broadcast()
+
+                if room.advance_in_progress:
+                    await ws.send(json.dumps({
+                        "type": "error",
+                        "message": "Esperá a que termine el cambio de canción actual."
+                    }))
+                    log.info("%s intentó hacer next durante el grace", who)
+                    continue
+
+                log.info("%s pidió next", who)
+
+                await advance_with_grace(
+                    MANUAL_ADVANCE_GRACE,
+                    reason=f"manual por {who}",
+                )
 
             elif mtype == "pause":
                 if room.current:
