@@ -4,23 +4,23 @@ Syncatuna - servidor.
 
 Mantiene la cola colaborativa y un "reloj maestro" de reproduccion:
 sabe qué cancion suena, en qué segundo, y desde qué instante del
-servidor. 
-No reproduce audio: solo coordina a los clientes.
-
+servidor.
+No reproduce audio, y tampoco resuelve metadata: eso lo hace cada
+cliente contra su PROPIO yt-dlp antes de mandar el "add". El servidor
+solo coordina y valida lo que llega, nunca ejecuta yt-dlp
 """
-import os
+import re
 import asyncio
 import json
 import signal
 import sys
 import time
 import uuid
-import subprocess
 import logging
+import math
 from dataclasses import dataclass, asdict
 from typing import Optional
 from urllib.parse import urlparse
-from pathlib import Path
 
 import websockets
 from websockets.asyncio.server import ServerConnection
@@ -31,14 +31,18 @@ log = logging.getLogger("syncatuna-server")
 ############## CONFIG VARS ##############
 
 HOST = "127.0.0.1"
+MAX_MSG_SIZE = 8192  # bytes por frame de websocket (los mensajes son chicos, no hace falta más)
 WATCHDOG_INTERVAL = 2.0    # cada cuánto revisa si ya terminó la canción actual
 AUTO_ADVANCE_GRACE = 3.0
 
 MAX_QUEUE_SIZE = 100
 MAX_URL_LENGTH = 2048
+MAX_TITLE_LENGTH = 200
+MAX_NAME_LENGTH = 24
+MAX_DURATION_SECONDS = 6 * 3600  # 6hs, generoso pero no infinito xd
 
-METADATA_CONCURRENCY = 2
-metadata_semaphore = asyncio.Semaphore(METADATA_CONCURRENCY)
+ADD_COOLDOWN_SECONDS = 2.0
+last_add_time: dict = {}  # ServerConnection -> último timestamp de "add" (Para llevar control del cooldown)
 
 ALLOWED_HOSTS = {
     "youtube.com",
@@ -48,50 +52,14 @@ ALLOWED_HOSTS = {
     "youtu.be",
 }
 
-YT_DLP_BASE_ARGS = [
-    "yt-dlp",
-    "--ignore-config",
-    "-J",
-    "--no-warnings",
-    "--skip-download",
-    "--no-playlist",
-]
-
-COOKIES_FILE = Path(
-    os.environ.get(
-        "SYNCATUNA_COOKIES",
-        "~/.config/syncatuna/cookies.txt",
-    )
-)
+# Caracteres de control (incluye ESC, 0x1b) fuera de nombres/titulos (Por si acaso xd)
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
-def fetch_metadata(url: str) -> dict:
-    args = YT_DLP_BASE_ARGS.copy()
-
-    if COOKIES_FILE.is_file():
-        args += ["--cookies", str(COOKIES_FILE)]
-
-    args += ["--", url]
-    
-    try:
-        result = subprocess.run(
-            args,
-            capture_output=True, 
-            text=True, 
-            timeout=30,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip()[:300])
-        data = json.loads(result.stdout)
-        return {
-            "title": data.get("title") or url,
-            "duration": float(data.get("duration") or 0),
-            #"thumbnail": data.get("thumbnail") or "",
-        }
-    except Exception as e:
-        log.warning("No se pudo obtener metadata de %s: %s", url, e)
-        return {"title": url, "duration": 0.0}
-        #return {"title": url, "duration": 0.0, "thumbnail": ""}
+def sanitize_text(value, max_len: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return _CONTROL_CHARS_RE.sub("", value).strip()[:max_len]
 
 
 def validate_url(url: str) -> bool:
@@ -117,13 +85,22 @@ def validate_url(url: str) -> bool:
     return True
 
 
+def validate_duration(value) -> "float | None":
+    try:
+        d = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(d) or d < 0 or d > MAX_DURATION_SECONDS:
+        return None
+    return d
+
+
 @dataclass
 class Track:
     id: str
     url: str
     title: str
     duration: float
-    #thumbnail: str
     added_by: str
 
 
@@ -225,7 +202,7 @@ async def handler(ws: ServerConnection):
             mtype = msg.get("type")
 
             if mtype == "hello":
-                name = (msg.get("name") or name)[:24]
+                name = sanitize_text(msg.get("name") or name, MAX_NAME_LENGTH) or name
                 room.clients[ws] = name
                 log.info("%s se unió", name)
                 await ws.send(json.dumps(room.state_message()))
@@ -235,20 +212,34 @@ async def handler(ws: ServerConnection):
                 url = (msg.get("url") or "").strip()
                 if not url:
                     continue
+
                 if len(room.queue) >= MAX_QUEUE_SIZE:
-                    log.warning("Cola llena; rechazando nueva URL")
+                    await ws.send(json.dumps({"type": "error", "message": "La cola está llena."}))
                     continue
+
+                now = time.time()
+                if now - last_add_time.get(ws, 0.0) < ADD_COOLDOWN_SECONDS:
+                    await ws.send(json.dumps({"type": "error", "message": "Esperá un momento antes de agregar otra."}))
+                    continue
+
                 if not validate_url(url):
+                    await ws.send(json.dumps({
+                        "type": "error",
+                        "message": "Solo se permiten URLs de YouTube.",
+                    }))
                     log.warning("URL rechazada: %r", url)
                     continue
-                #meta = await asyncio.to_thread(fetch_metadata, url)
-                # Es como un semaforo para que no se sobrecargue de solicitudes de descarga de metadata al mismo tiempo
-                async with metadata_semaphore:
-                    meta = await asyncio.to_thread(fetch_metadata, url)
+
+                title = sanitize_text(msg.get("title"), MAX_TITLE_LENGTH) or url
+                duration = validate_duration(msg.get("duration"))
+                if duration is None:
+                    await ws.send(json.dumps({"type": "error", "message": "Duración inválida."}))
+                    continue
+
+                last_add_time[ws] = now
                 track = Track(
-                    id=str(uuid.uuid4())[:8], url=url, title=meta["title"],
-                    #duration=meta["duration"], thumbnail=meta["thumbnail"],
-                    duration=meta["duration"],
+                    id=str(uuid.uuid4())[:8], url=url, title=title,
+                    duration=duration,
                     added_by=room.clients.get(ws, name),
                 )
                 room.queue.append(track)
@@ -275,7 +266,10 @@ async def handler(ws: ServerConnection):
                     await broadcast()
 
             elif mtype == "seek":
-                pos = float(msg.get("position", 0))
+                try:
+                    pos = float(msg.get("position", 0))
+                except (TypeError, ValueError):
+                    continue
                 if room.current:
                     room.set_anchor(max(0.0, pos), room.playing)
                     await broadcast()
@@ -286,6 +280,7 @@ async def handler(ws: ServerConnection):
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
+        last_add_time.pop(ws, None)
         left = room.clients.pop(ws, None)
         if left:
             log.info("%s se fue", left)
@@ -303,9 +298,8 @@ async def main(argv=None):
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         loop.add_signal_handler(sig, stop.set)
 
-    async with websockets.serve(handler, HOST, port, ping_interval=20, ping_timeout=20):
+    async with websockets.serve(handler, HOST, port, ping_interval=20, ping_timeout=20, max_size=MAX_MSG_SIZE):
         log.info("Servidor Syncatuna escuchando en %s:%s (usa tu IP de VPN para que se conecten)", HOST, port)
-        log.info("Cookies file path: %s" , COOKIES_FILE)
         watchdog_task = asyncio.create_task(watchdog())
         await stop.wait()
         log.info("Cerrando servidor...")

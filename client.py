@@ -32,6 +32,25 @@ def emit(text: str):
     print_formatted_text(ANSI(text))
 
 
+def fetch_metadata_local(url: str) -> dict:
+    """
+    Resuelve título y duración con NUESTRO propio yt-dlp, antes de mandar
+    el "add" al servidor. El servidor no ejecuta yt-dlp
+    """
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "-J", "--no-warnings", "--skip-download", "--no-playlist", "--", url],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip()[:300])
+        data = json.loads(result.stdout)
+        return {"title": data.get("title") or url, "duration": float(data.get("duration") or 0)}
+    except Exception as e:
+        emit(f"No pude leer los datos de esa URL con yt-dlp: {e}")
+        return None
+
+
 class MPV:
 
     def __init__(self, socket_path: str):
@@ -244,6 +263,8 @@ async def receiver(ws, mpv: MPV):
             handle_pong(msg)
         elif mtype == "state":
             await apply_state(msg, mpv)
+        elif mtype == "error":
+            emit(f"{msg.get('message', 'Error del servidor.')}")
 
 
 async def apply_state(msg, mpv: MPV):
@@ -334,7 +355,13 @@ async def input_loop(ws):
         elif line in ("h", "help", "?"):
             print_help()
         elif line.startswith("http"):
-            await ws.send(json.dumps({"type": "add", "url": line}))
+            emit("… resolviendo con yt-dlp")
+            meta = await asyncio.to_thread(fetch_metadata_local, line)
+            if meta is not None:
+                await ws.send(json.dumps({
+                    "type": "add", "url": line,
+                    "title": meta["title"], "duration": meta["duration"],
+                }))
         else:
             print("Comando no reconocido. Escribe 'h' para ayuda.")
 
