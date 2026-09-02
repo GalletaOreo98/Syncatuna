@@ -29,20 +29,57 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("syncatuna-server")
 
 ############## CONFIG VARS ##############
+from config import load_config
 
-HOST = "127.0.0.1"
-MAX_MSG_SIZE = 8192  # bytes por frame de websocket (los mensajes son chicos, no hace falta más)
-WATCHDOG_INTERVAL = 2.0    # cada cuánto revisa si ya terminó la canción actual
-AUTO_ADVANCE_GRACE = 3.0
-MANUAL_ADVANCE_GRACE = 3.0
+CONFIG = load_config()
+SERVER_CONFIG = CONFIG["server"]
 
-MAX_QUEUE_SIZE = 100
-MAX_URL_LENGTH = 2048
-MAX_TITLE_LENGTH = 200
-MAX_NAME_LENGTH = 24
-MAX_DURATION_SECONDS = 6 * 3600  # 6hs, generoso pero no infinito xd
+HOST = str(
+    SERVER_CONFIG["host"]
+)
 
-ADD_COOLDOWN_SECONDS = 2.0
+# bytes por frame de websocket (los mensajes son chicos, no hace falta más)
+MAX_MSG_SIZE = int(
+    SERVER_CONFIG["max_msg_size"]
+)
+
+WATCHDOG_INTERVAL = float(
+    SERVER_CONFIG["watchdog_interval"]
+)
+
+AUTO_ADVANCE_GRACE = float(
+    SERVER_CONFIG["auto_advance_grace"]
+)
+
+MANUAL_ADVANCE_GRACE = float(
+    SERVER_CONFIG["manual_advance_grace"]
+)
+
+MAX_QUEUE_SIZE = int(
+    SERVER_CONFIG["max_queue_size"]
+)
+
+MAX_URL_LENGTH = int(
+    SERVER_CONFIG["max_url_length"]
+)
+
+MAX_TITLE_LENGTH = int(
+    SERVER_CONFIG["max_title_length"]
+)
+
+MAX_NAME_LENGTH = int(
+    SERVER_CONFIG["max_name_length"]
+)
+
+# Generoso pero no infinito xd
+MAX_DURATION_SECONDS = int(
+    SERVER_CONFIG["max_duration_seconds"]
+)
+
+ADD_COOLDOWN_SECONDS = float(
+    SERVER_CONFIG["add_cooldown_seconds"]
+)
+
 last_add_time: dict = {}  # ServerConnection -> último timestamp de "add" (Para llevar control del cooldown)
 
 ALLOWED_HOSTS = {
@@ -329,7 +366,9 @@ async def handler(ws: ServerConnection):
 
 async def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
-    port = int(args[0]) if args else 8765
+    port = int(args[0]) if args else int(
+        SERVER_CONFIG["port"]
+    )
     stop = asyncio.Event()
 
     loop = asyncio.get_running_loop()

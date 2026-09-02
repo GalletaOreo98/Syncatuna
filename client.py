@@ -22,8 +22,20 @@ except ImportError:
     print("Falta prompt_toolkit. Instálalo con: pip install --user prompt_toolkit")
     sys.exit(1)
 
-CLOCK_SYNC_INTERVAL = 20.0 
-TICKER_INTERVAL = 1.0 #(barra inferior)
+############## CONFIG VARS ##############
+from config import load_config
+
+CONFIG = load_config()
+CLIENT_CONFIG = CONFIG["client"]
+
+CLOCK_SYNC_INTERVAL = float(
+    CLIENT_CONFIG["clock_sync_interval"]
+)
+
+# (barra inferior)
+TICKER_INTERVAL = float(
+    CLIENT_CONFIG["ticker_interval"]
+)
 
 session = PromptSession()
 
