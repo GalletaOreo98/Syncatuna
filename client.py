@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Syncatuna - cliente.
+Syncatuna - client.
 """
 import asyncio
 import json
@@ -19,7 +19,7 @@ try:
     from prompt_toolkit.patch_stdout import patch_stdout
     from prompt_toolkit.formatted_text import ANSI
 except ImportError:
-    print("Falta prompt_toolkit. Instálalo con: pip install --user prompt_toolkit")
+    print("Missing prompt_toolkit. Install it with: pip install --user prompt_toolkit")
     sys.exit(1)
 
 ############## CONFIG VARS ##############
@@ -32,7 +32,7 @@ CLOCK_SYNC_INTERVAL = float(
     CLIENT_CONFIG["clock_sync_interval"]
 )
 
-# (barra inferior)
+# (bottom toolbar)
 TICKER_INTERVAL = float(
     CLIENT_CONFIG["ticker_interval"]
 )
@@ -45,10 +45,6 @@ def emit(text: str):
 
 
 def fetch_metadata_local(url: str) -> dict:
-    """
-    Resuelve título y duración con NUESTRO propio yt-dlp, antes de mandar
-    el "add" al servidor. El servidor no ejecuta yt-dlp
-    """
     try:
         result = subprocess.run(
             ["yt-dlp", "-J", "--no-warnings", "--skip-download", "--no-playlist", "--", url],
@@ -59,7 +55,7 @@ def fetch_metadata_local(url: str) -> dict:
         data = json.loads(result.stdout)
         return {"title": data.get("title") or url, "duration": float(data.get("duration") or 0)}
     except Exception as e:
-        emit(f"No pude leer los datos de esa URL con yt-dlp: {e}")
+        emit(f"Could not read metadata from that URL with yt-dlp: {e}")
         return None
 
 
@@ -89,7 +85,7 @@ class MPV:
                 except OSError:
                     pass
             time.sleep(0.1)
-        raise RuntimeError("mpv no levantó el socket IPC a tiempo (¿está instalado mpv?)")
+        raise RuntimeError("mpv didn't start the IPC socket in time (is mpv installed?)")
 
     def _connect(self):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -190,7 +186,6 @@ async def clock_sync_loop(ws):
 
 
 async def apply_new_track(mpv: MPV, track_id: str, url: str):
-    """Carga una pista y, cuando mpv esté listo, aplica el estado ACTUAL."""
     try:
         await asyncio.to_thread(mpv.loadfile, url)
 
@@ -199,7 +194,7 @@ async def apply_new_track(mpv: MPV, track_id: str, url: str):
         for _ in range(100):
             await asyncio.sleep(0.15)
 
-            # Si mientras cargábamos cambió la canción, abandonamos
+            # If the song changed while loading, we abort
             if not state.current or state.current["id"] != track_id:
                 return
 
@@ -209,12 +204,9 @@ async def apply_new_track(mpv: MPV, track_id: str, url: str):
                 break
 
         if not ready:
-            emit("No se pudo cargar la canción a tiempo")
+            emit("Could not load the song in time")
             return
 
-        # MUY IMPORTANTE:
-        # No usamos should_play ni target_position guardados del pasado.
-        # Consultamos el estado actual del servidor.
         if not state.current or state.current["id"] != track_id:
             return
 
@@ -239,24 +231,24 @@ def render_dashboard(announcements: "list[str] | None" = None, clear: bool = Fal
     from rich.rule import Rule
     from rich.text import Text
 
-    conectados = Text(f"🟢 Conectados ({len(state.users)})")
+    connected = Text(f"🟢 Connected ({len(state.users)})")
 
     now_playing = Text()
     if state.current:
         now_playing.append("🎵 ", style="bold")
         now_playing.append(state.current["title"], style="bold")
         now_playing.append("\n")
-        now_playing.append("agregado por ", style="dim")
+        now_playing.append("added by ", style="dim")
         now_playing.append(state.current["added_by"], style="dim")
-        now_playing.append(" · dura ", style="dim")
+        now_playing.append(" · lasts ", style="dim")
         now_playing.append(fmt_time(state.current["duration"]), style="dim")
     else:
-        now_playing.append("(nada sonando - pega una URL de YouTube y Enter)", style="dim")
+        now_playing.append("(nothing playing - paste a YouTube URL and press Enter)", style="dim")
 
     shown = state.queue[:2]
     remaining = len(state.queue) - len(shown)
     queue_text = Text()
-    queue_text.append("Cola\n", style="bold")
+    queue_text.append("Queue\n", style="bold")
     if shown:
         for i, t in enumerate(shown):
             queue_text.append(f"{i + 1}. ")
@@ -267,9 +259,9 @@ def render_dashboard(announcements: "list[str] | None" = None, clear: bool = Fal
         if remaining > 0:
             queue_text.append(f"+{remaining}", style="dim")
     else:
-        queue_text.append("(vacía)", style="dim")
+        queue_text.append("(empty)", style="dim")
 
-    group = Group(conectados, now_playing, Rule(style="dim"), queue_text)
+    group = Group(connected, now_playing, Rule(style="dim"), queue_text)
 
     buf = _io.StringIO()
     console = Console(file=buf, force_terminal=True, color_system="256", width=DASHBOARD_WIDTH)
@@ -285,8 +277,8 @@ def render_dashboard(announcements: "list[str] | None" = None, clear: bool = Fal
 
     console.print(Panel(
         group,
-        title="🎵 Syncatuna 🎵",
-        subtitle="URL=agregar · n=next · p=pausa · r=reanudar · q=salir",
+        title="🐱 Syncatuna 🐱",
+        subtitle="URL=add · n=next · p=pause · r=resume · q=quit",
         subtitle_align="left",
         width=DASHBOARD_WIDTH,
     ))
@@ -302,7 +294,7 @@ async def receiver(ws, mpv: MPV):
         elif mtype == "state":
             await apply_state(msg, mpv)
         elif mtype == "error":
-            emit(f"{msg.get('message', 'Error del servidor.')}")
+            emit(f"{msg.get('message', 'Server error.')}")
 
 
 async def apply_state(msg, mpv: MPV):
@@ -327,7 +319,7 @@ async def apply_state(msg, mpv: MPV):
     track_changed = new_id != state.loaded_track_id
 
     if track_changed:
-        # Cancelamos la carga anterior si todavía existe.
+        # Cancel the previous load if it still exists.
         if state.loading_task and not state.loading_task.done():
             state.loading_task.cancel()
 
@@ -348,8 +340,8 @@ async def apply_state(msg, mpv: MPV):
     else:
         state.current = new_current
 
-        # Si la pista todavía se está cargando, NO intentamos
-        # hacer seek/pause sobre ella todavía.
+        # If the track is still loading, DON'T attempt
+        # seek/pause on it yet.
         if state.loaded_track_id == new_id:
             await asyncio.to_thread(
                 mpv.seek_abs,
@@ -367,7 +359,7 @@ async def apply_state(msg, mpv: MPV):
         if added_ids:
             all_known = list(state.queue) + ([state.current] if state.current else [])
             added_tracks = [t for t in all_known if t["id"] in added_ids]
-            announcements = [f"{t['added_by']} agregó: {t['title']}" for t in added_tracks]
+            announcements = [f"{t['added_by']} added: {t['title']}" for t in added_tracks]
         try:
             emit(render_dashboard(announcements=announcements, clear=bool(added_ids)))
         except Exception:
@@ -381,7 +373,7 @@ def fmt_time(seconds) -> str:
 
 def bottom_toolbar():
     if not state.current:
-        return " (Nada sonando todavía — pega una URL de YouTube y Enter)"
+        return " (Nothing playing yet — paste a YouTube URL and press Enter)"
     status = "▶" if state.playing else "⏸"
     pos = fmt_time(state.expected_position())
     dur = fmt_time(state.current["duration"])
@@ -405,18 +397,18 @@ async def input_loop(ws):
         line = line.strip()
         if not line:
             continue
-        if line in ("q", "quit", "salir"):
-            return  # deja que main() haga la limpieza (cerrar mpv, etc.)
+        if line in ("q", "quit"):
+            return
         elif line in ("n", "next"):
             await ws.send(json.dumps({"type": "next"}))
-        elif line in ("p", "pause", "pausa"):
+        elif line in ("p", "pause"):
             await ws.send(json.dumps({"type": "pause"}))
-        elif line in ("r", "resume", "reanudar", "play"):
+        elif line in ("r", "resume", "play"):
             await ws.send(json.dumps({"type": "resume"}))
         elif line in ("h", "help", "?"):
             print_help()
         elif line.startswith("http"):
-            emit("… resolviendo con yt-dlp")
+            emit("… resolving with yt-dlp")
             meta = await asyncio.to_thread(fetch_metadata_local, line)
             if meta is not None:
                 await ws.send(json.dumps({
@@ -424,7 +416,7 @@ async def input_loop(ws):
                     "title": meta["title"], "duration": meta["duration"],
                 }))
         else:
-            print("Comando no reconocido. Escribe 'h' para ayuda.")
+            print("Unrecognized command. Type 'h' for help.")
 
 
 def install_shutdown_handlers(mpv: MPV):
@@ -440,7 +432,7 @@ def install_shutdown_handlers(mpv: MPV):
 async def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) < 2:
-        print('Uso interno: client.py ws://IP_DEL_HOST:8765 "TuNombre"')
+        print('Internal usage: client.py ws://HOST_IP:8765 "YourName"')
         return 2
     url, name = args[0], args[1]
 

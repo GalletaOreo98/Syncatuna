@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Syncatuna - servidor.
+Syncatuna - server.
 
-Mantiene la cola colaborativa y un "reloj maestro" de reproduccion:
-sabe qué cancion suena, en qué segundo, y desde qué instante del
-servidor.
-No reproduce audio, y tampoco resuelve metadata: eso lo hace cada
-cliente contra su PROPIO yt-dlp antes de mandar el "add". El servidor
-solo coordina y valida lo que llega, nunca ejecuta yt-dlp
+Keeps the collaborative queue and a "master clock" of playback:
+knows which song is playing, at which second, and from which server
+timestamp.
+It doesn't play audio, nor does it resolve metadata: each client does
+that against its OWN yt-dlp before sending the "add". The server only
+coordinates and validates what comes in.
 """
 import re
 import asyncio
@@ -38,7 +38,7 @@ HOST = str(
     SERVER_CONFIG["host"]
 )
 
-# bytes por frame de websocket (los mensajes son chicos, no hace falta más)
+# bytes per websocket frame (messages are small, no need for more)
 MAX_MSG_SIZE = int(
     SERVER_CONFIG["max_msg_size"]
 )
@@ -71,7 +71,7 @@ MAX_NAME_LENGTH = int(
     SERVER_CONFIG["max_name_length"]
 )
 
-# Generoso pero no infinito xd
+# Generous but not infinite xd
 MAX_DURATION_SECONDS = int(
     SERVER_CONFIG["max_duration_seconds"]
 )
@@ -80,7 +80,7 @@ ADD_COOLDOWN_SECONDS = float(
     SERVER_CONFIG["add_cooldown_seconds"]
 )
 
-last_add_time: dict = {}  # ServerConnection -> último timestamp de "add" (Para llevar control del cooldown)
+last_add_time: dict = {}  #  to keep track of the "add" cooldown
 
 ALLOWED_HOSTS = {
     "youtube.com",
@@ -90,7 +90,7 @@ ALLOWED_HOSTS = {
     "youtu.be",
 }
 
-# Caracteres de control (incluye ESC, 0x1b) fuera de nombres/titulos (Por si acaso xd)
+# Control characters (including ESC, 0x1b Just in case xd)
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -148,7 +148,7 @@ class Room:
         self.queue: list[Track] = []
         self.current: Optional[Track] = None
         self.playing: bool = False
-        self.anchor_position: float = 0.0   # segundo del track en anchor_time
+        self.anchor_position: float = 0.0   # second within the track at anchor_time
         self.anchor_time: float = time.time()
         self.clients: dict[ServerConnection, str] = {}
         self.advance_in_progress = False
@@ -228,7 +228,7 @@ async def advance_with_grace(grace: float, reason: str = "auto"):
             room.set_anchor(0.0, True)
 
             log.info(
-                "Arrancando '%s' sincronizado para todos (%s, grace=%.1fs)",
+                "Starting '%s' synced for everyone (%s, grace=%.1fs)",
                 room.current.title,
                 reason,
                 grace,
@@ -247,13 +247,13 @@ async def watchdog():
         if room.current and room.playing and room.current.duration > 0:
             if room.live_position() >= room.current.duration:
                 log.info(
-                    "Fin de '%s' -> avanzando cola (con margen de sincronización)",
+                    "End of '%s' -> advancing queue (with sync margin)",
                     room.current.title,
                 )
 
                 await advance_with_grace(
                     AUTO_ADVANCE_GRACE,
-                    reason="automático",
+                    reason="automatic",
                 )
 
 
@@ -270,7 +270,7 @@ async def handler(ws: ServerConnection):
             if mtype == "hello":
                 name = sanitize_text(msg.get("name") or name, MAX_NAME_LENGTH) or name
                 room.clients[ws] = name
-                log.info("%s se unió", name)
+                log.info("%s joined", name)
                 await ws.send(json.dumps(room.state_message()))
                 await broadcast()
 
@@ -280,18 +280,18 @@ async def handler(ws: ServerConnection):
                     continue
 
                 if len(room.queue) >= MAX_QUEUE_SIZE:
-                    await ws.send(json.dumps({"type": "error", "message": "La cola está llena."}))
+                    await ws.send(json.dumps({"type": "error", "message": "The queue is full."}))
                     continue
 
                 now = time.time()
                 if now - last_add_time.get(ws, 0.0) < ADD_COOLDOWN_SECONDS:
-                    await ws.send(json.dumps({"type": "error", "message": "Esperá un momento antes de agregar otra."}))
+                    await ws.send(json.dumps({"type": "error", "message": "Wait a moment before adding another."}))
                     continue
 
                 if not validate_url(url):
                     await ws.send(json.dumps({
                         "type": "error",
-                        "message": "Solo se permiten URLs de YouTube.",
+                        "message": "Only YouTube URLs are allowed.",
                     }))
                     log.warning("URL rechazada: %r", url)
                     continue
@@ -299,7 +299,7 @@ async def handler(ws: ServerConnection):
                 title = sanitize_text(msg.get("title"), MAX_TITLE_LENGTH) or url
                 duration = validate_duration(msg.get("duration"))
                 if duration is None:
-                    await ws.send(json.dumps({"type": "error", "message": "Duración inválida."}))
+                    await ws.send(json.dumps({"type": "error", "message": "Invalid duration."}))
                     continue
 
                 last_add_time[ws] = now
@@ -311,7 +311,7 @@ async def handler(ws: ServerConnection):
                 room.queue.append(track)
                 if room.current is None:
                     room.advance()
-                log.info("%s agregó: %s (%.0fs)", track.added_by, track.title, track.duration)
+                log.info("%s added: %s (%.0fs)", track.added_by, track.title, track.duration)
                 await broadcast()
 
             elif mtype == "next":
@@ -320,16 +320,16 @@ async def handler(ws: ServerConnection):
                 if room.advance_in_progress:
                     await ws.send(json.dumps({
                         "type": "error",
-                        "message": "Esperá a que termine el cambio de canción actual."
+                        "message": "Wait for the current track change to finish."
                     }))
-                    log.info("%s intentó hacer next durante el grace", who)
+                    log.info("%s tried to do next during the grace", who)
                     continue
 
-                log.info("%s pidió next", who)
+                log.info("%s requested next", who)
 
                 await advance_with_grace(
                     MANUAL_ADVANCE_GRACE,
-                    reason=f"manual por {who}",
+                    reason=f"manual by {who}",
                 )
 
             elif mtype == "pause":
@@ -360,7 +360,7 @@ async def handler(ws: ServerConnection):
         last_add_time.pop(ws, None)
         left = room.clients.pop(ws, None)
         if left:
-            log.info("%s se fue", left)
+            log.info("%s left", left)
             await broadcast()
 
 
@@ -372,16 +372,16 @@ async def main(argv=None):
     stop = asyncio.Event()
 
     loop = asyncio.get_running_loop()
-    # SIGHUP llega al cerrar la terminal/pestaña, SIGTERM en un kill normal
-    # SIGINT es Ctrl+C. Con los 3 cubiertos no queda el proceso zombie
+    # SIGHUP arrives when closing the terminal/tab, SIGTERM on a normal kill
+    # SIGINT is Ctrl+C. With all 3 covered no zombie process is left
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         loop.add_signal_handler(sig, stop.set)
 
     async with websockets.serve(handler, HOST, port, ping_interval=20, ping_timeout=20, max_size=MAX_MSG_SIZE):
-        log.info("Servidor Syncatuna escuchando en %s:%s (usa tu IP de VPN para que se conecten)", HOST, port)
+        log.info("Syncatuna server listening on %s:%s (use your VPN IP so clients can connect)", HOST, port)
         watchdog_task = asyncio.create_task(watchdog())
         await stop.wait()
-        log.info("Cerrando servidor...")
+        log.info("Shutting down server...")
         watchdog_task.cancel()
 
     return 0

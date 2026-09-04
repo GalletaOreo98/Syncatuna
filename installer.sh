@@ -2,7 +2,7 @@
 set -eu
 
 APP_NAME="syncatuna"
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_NAME"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_NAME"
