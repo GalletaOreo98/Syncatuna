@@ -74,8 +74,7 @@ def main() -> int:
         except RuntimeError as exc:
             print(f"[Syncatuna] Error: {exc}")
             return 1
-        print(f"[Syncatuna] Favorites: {summary['added']} added, "
-              f"{summary['skipped']} unavailable, "
+        print(f"[Syncatuna] Favorites: {summary['added']} new of "
               f"{summary['fetched']} fetched - {summary['total']} total")
         return 0
 
