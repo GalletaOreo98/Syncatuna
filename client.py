@@ -238,7 +238,17 @@ def render_dashboard(announcements: "list[str] | None" = None, clear: bool = Fal
     from rich.rule import Rule
     from rich.text import Text
 
-    connected = Text(f"🟢 Connected ({len(state.users)})")
+    from rich.cells import cell_len
+
+    left = f"🟢 Connected ({len(state.users)})"
+    right = f"⭐ {count_favorites()}"
+    # Keep the row below the panel's wrap threshold: a line that lands exactly
+    # on the interior edge with a wide char folds its last cell by the panel.
+    pad = max(1, DASHBOARD_WIDTH - 4 - cell_len(left) - cell_len(right))
+    connected = Text()
+    connected.append(left)
+    connected.append(" " * pad)
+    connected.append(right)
 
     now_playing = Text()
     if state.current:

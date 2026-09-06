@@ -154,12 +154,14 @@ Blank lines and lines starting with `#` are ignored, and entries are deduplicate
 
 ### Adding a whole playlist
 
-`syncatuna -favorites "PLAYLIST_URL"` fetches the tracks of a YouTube playlist with `yt-dlp --flat-playlist`, appends what is new to your `favorites.txt` (never deleting what was already there) and re-sorts the file:
+`syncatuna -f "PLAYLIST_URL"` (alias `-favorites`/`--favorites`) fetches the tracks of a YouTube playlist with `yt-dlp --flat-playlist`, appends what is new to your `favorites.txt` (never deleting what was already there) and re-sorts the file:
 
 ```sh
 syncatuna -favorites "https://youtube.com/playlist?list=PLxxx..."
-# [Syncatuna] Favorites: 12 new of 30 fetched - 42 total
+# [Syncatuna] Favorites: 12 added, 3 unavailable, 30 fetched - 42 total
 ```
+
+Only URLs that are **available at the moment the command runs** are added: new tracks are resolved individually with `yt-dlp` (in parallel) so private, hidden, geo-blocked or deleted videos are skipped (reported as `unavailable`). Tracks already in the file are not re-checked and are never removed.
 
 It is a standalone mode, mutually exclusive with `-s`/`-c`.
 
