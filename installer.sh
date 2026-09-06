@@ -107,6 +107,10 @@ curl -fsSL "$REPO_RAW/config.py" \
     -o "$STAGE/config.py" \
     || fail "Could not download config.py."
 
+curl -fsSL "$REPO_RAW/favorites.py" \
+    -o "$STAGE/favorites.py" \
+    || fail "Could not download favorites.py."
+
 curl -fsSL "$REPO_RAW/requirements.txt" \
     -o "$STAGE/requirements.txt" \
     || fail "Could not download requirements.txt."
