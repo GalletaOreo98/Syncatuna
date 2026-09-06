@@ -7,9 +7,10 @@ import asyncio
 import sys
 
 import client
+import favorites
 import server
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  syncatuna -s 8765\n"
             '  syncatuna -c -n "Chris" localhost:8765\n'
             '  syncatuna -c -n "Chris" 100.64.0.10:8765\n'
+            '  syncatuna -favorites "https://youtube.com/playlist?list=..."\n'
         ),
     )
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -29,6 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="start the server (default port: 8765)")
     mode.add_argument("-c", "--client", action="store_true",
                       help="start the client")
+    mode.add_argument("-favorites", "--favorites", dest="favorites_playlist", metavar="URL",
+                      help="append the tracks of a YouTube playlist to your favorites.txt")
     parser.add_argument("-n", "--name", metavar="NAME",
                         help="name visible in the room (required for the client)")
     parser.add_argument("endpoint", nargs="?", metavar="HOST:PORT",
@@ -60,6 +64,19 @@ def normalize_endpoint(endpoint: str) -> str:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.favorites_playlist:
+        if args.name or args.endpoint:
+            parser.error("-n/--name and HOST:PORT are only used with -c/--client")
+        playlist_url = args.favorites_playlist
+        try:
+            summary = favorites.add_from_playlist(playlist_url)
+        except RuntimeError as exc:
+            print(f"[Syncatuna] Error: {exc}")
+            return 1
+        print(f"[Syncatuna] Favorites: {summary['added']} new of "
+              f"{summary['fetched']} fetched - {summary['total']} total")
+        return 0
 
     if args.client:
         if not args.name:

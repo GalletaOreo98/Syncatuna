@@ -142,7 +142,26 @@ Each client that keeps a `favorites.txt` in its Syncatuna config directory is el
 
 > CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_NAME"
 
-The file holds one YouTube URL per line. Blank lines and lines starting with `#` are ignored, and duplicate URLs are skipped.
+The file holds one track per line, either as a plain URL or as `url - title`:
+
+```text
+https://youtu.be/dQw4w9WgXcQ - Rick Astley - Never Gonna Give You Up
+https://www.youtube.com/watch?v=9bZkp7q19f0
+https://youtu.be/hjJ-fEo0Vv8 - Some Artist - Song
+```
+
+Blank lines and lines starting with `#` are ignored, and entries are deduplicated by URL (the optional title just helps identify the track). A title that itself contains ` - ` is fine: the URL part never contains spaces.
+
+### Adding a whole playlist
+
+`syncatuna -favorites "PLAYLIST_URL"` fetches the tracks of a YouTube playlist with `yt-dlp --flat-playlist`, appends what is new to your `favorites.txt` (never deleting what was already there) and re-sorts the file:
+
+```sh
+syncatuna -favorites "https://youtube.com/playlist?list=PLxxx..."
+# [Syncatuna] Favorites: 12 new of 30 fetched - 42 total
+```
+
+It is a standalone mode, mutually exclusive with `-s`/`-c`.
 
 At connect time the client tells the server how many favorites it has (the server never sees the URLs themselves). When the queue runs out, the server:
 

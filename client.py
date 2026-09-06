@@ -5,7 +5,6 @@ Syncatuna - client.
 import asyncio
 import json
 import os
-import random
 import signal
 import socket
 import subprocess
@@ -24,7 +23,9 @@ except ImportError:
     sys.exit(1)
 
 ############## CONFIG VARS ##############
-from config import load_config, get_config_dir
+from config import load_config
+
+from favorites import count_favorites, pick_random_favorite
 
 CONFIG = load_config()
 CLIENT_CONFIG = CONFIG["client"]
@@ -42,29 +43,11 @@ MAX_URL_TRIES = int(
     CLIENT_CONFIG["autofill"]["max_url_tries"]
 )
 
-FAVORITES_FILE = get_config_dir() / "favorites.txt"
-
 session = PromptSession()
 
 
 def emit(text: str):
     print_formatted_text(ANSI(text))
-
-
-def load_favorites() -> "list[str]":
-    try:
-        lines = FAVORITES_FILE.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    urls: list[str] = []
-    seen: set[str] = set()
-    for line in lines:
-        url = line.strip()
-        if not url or url.startswith("#") or url in seen:
-            continue
-        seen.add(url)
-        urls.append(url)
-    return urls
 
 
 def fetch_metadata_local(url: str, quiet: bool = False) -> dict:
@@ -326,10 +309,10 @@ async def receiver(ws, mpv: MPV):
             payload = {"type": "autofill_result", "request_id": request_id, "ok": False}
             attempted: set[str] = set()
             for _ in range(MAX_URL_TRIES):
-                pool = [u for u in load_favorites() if u not in attempted]
-                if not pool:
+                entry = pick_random_favorite(attempted)
+                if entry is None:
                     break
-                url = random.choice(pool)
+                url, _title = entry
                 attempted.add(url)
                 meta = await asyncio.to_thread(fetch_metadata_local, url, True)
                 if meta is not None:
@@ -490,7 +473,7 @@ async def main(argv=None):
         with patch_stdout():
             async with websockets.connect(url) as ws:
                 await ws.send(json.dumps({"type": "hello", "name": name,
-                                          "favorites_count": len(load_favorites())}))
+                                          "favorites_count": count_favorites()}))
                 asyncio.create_task(clock_sync_loop(ws))
                 recv_task = asyncio.create_task(receiver(ws, mpv))
                 try:
