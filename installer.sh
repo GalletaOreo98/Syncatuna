@@ -198,6 +198,11 @@ max_duration_seconds = 21600
 # Minimum delay between "add" requests from the same client
 add_cooldown_seconds = 2.0
 
+[server.autofill]
+# When the queue runs out, pick a random connected client to supply a song
+enabled = true
+max_client_tries = 2   # how many clients to try before giving up
+response_timeout = 45.0  # seconds to wait for the client to reply
 
 [client]
 
@@ -206,6 +211,10 @@ clock_sync_interval = 20.0
 
 # Terminal UI refresh interval
 ticker_interval = 1.0
+
+[client.autofill]
+# How many URLs to try from your favorites.txt when asked to pick a song
+max_url_tries = 3
 EOF
 
     chmod 600 "$CONFIG_FILE"

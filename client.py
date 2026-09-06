@@ -5,6 +5,7 @@ Syncatuna - client.
 import asyncio
 import json
 import os
+import random
 import signal
 import socket
 import subprocess
@@ -23,7 +24,7 @@ except ImportError:
     sys.exit(1)
 
 ############## CONFIG VARS ##############
-from config import load_config
+from config import load_config, get_config_dir
 
 CONFIG = load_config()
 CLIENT_CONFIG = CONFIG["client"]
@@ -37,6 +38,12 @@ TICKER_INTERVAL = float(
     CLIENT_CONFIG["ticker_interval"]
 )
 
+MAX_URL_TRIES = int(
+    CLIENT_CONFIG["autofill"]["max_url_tries"]
+)
+
+FAVORITES_FILE = get_config_dir() / "favorites.txt"
+
 session = PromptSession()
 
 
@@ -44,7 +51,23 @@ def emit(text: str):
     print_formatted_text(ANSI(text))
 
 
-def fetch_metadata_local(url: str) -> dict:
+def load_favorites() -> "list[str]":
+    try:
+        lines = FAVORITES_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    urls: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        url = line.strip()
+        if not url or url.startswith("#") or url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def fetch_metadata_local(url: str, quiet: bool = False) -> dict:
     try:
         result = subprocess.run(
             ["yt-dlp", "-J", "--no-warnings", "--skip-download", "--no-playlist", "--", url],
@@ -55,7 +78,8 @@ def fetch_metadata_local(url: str) -> dict:
         data = json.loads(result.stdout)
         return {"title": data.get("title") or url, "duration": float(data.get("duration") or 0)}
     except Exception as e:
-        emit(f"Could not read metadata from that URL with yt-dlp: {e}")
+        if not quiet:
+            emit(f"Could not read metadata from that URL with yt-dlp: {e}")
         return None
 
 
@@ -295,6 +319,27 @@ async def receiver(ws, mpv: MPV):
             await apply_state(msg, mpv)
         elif mtype == "error":
             emit(f"{msg.get('message', 'Server error.')}")
+        elif mtype == "autofill_request":
+            request_id = msg.get("request_id")
+            if request_id is None:
+                continue
+            payload = {"type": "autofill_result", "request_id": request_id, "ok": False}
+            attempted: set[str] = set()
+            for _ in range(MAX_URL_TRIES):
+                pool = [u for u in load_favorites() if u not in attempted]
+                if not pool:
+                    break
+                url = random.choice(pool)
+                attempted.add(url)
+                meta = await asyncio.to_thread(fetch_metadata_local, url, True)
+                if meta is not None:
+                    payload = {
+                        "type": "autofill_result", "request_id": request_id,
+                        "ok": True, "url": url,
+                        "title": meta["title"], "duration": meta["duration"],
+                    }
+                    break
+            await ws.send(json.dumps(payload))
 
 
 async def apply_state(msg, mpv: MPV):
@@ -444,7 +489,8 @@ async def main(argv=None):
     try:
         with patch_stdout():
             async with websockets.connect(url) as ws:
-                await ws.send(json.dumps({"type": "hello", "name": name}))
+                await ws.send(json.dumps({"type": "hello", "name": name,
+                                          "favorites_count": len(load_favorites())}))
                 asyncio.create_task(clock_sync_loop(ws))
                 recv_task = asyncio.create_task(receiver(ws, mpv))
                 try:

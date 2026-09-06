@@ -31,11 +31,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_duration_seconds": 21600,
 
         "add_cooldown_seconds": 2.0,
+
+        "autofill": {
+            "enabled": True,
+            "max_client_tries": 2,
+            "response_timeout": 45.0,
+        },
     },
 
     "client": {
         "clock_sync_interval": 20.0,
         "ticker_interval": 1.0,
+
+        "autofill": {
+            "max_url_tries": 3,
+        },
     },
 }
 

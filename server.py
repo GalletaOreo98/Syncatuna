@@ -12,6 +12,7 @@ coordinates and validates what comes in.
 import re
 import asyncio
 import json
+import random
 import signal
 import sys
 import time
@@ -82,6 +83,18 @@ ADD_COOLDOWN_SECONDS = float(
 
 last_add_time: dict = {}  #  to keep track of the "add" cooldown
 
+AUTOFILL_ENABLED = bool(
+    SERVER_CONFIG["autofill"]["enabled"]
+)
+
+MAX_CLIENT_TRIES = int(
+    SERVER_CONFIG["autofill"]["max_client_tries"]
+)
+
+AUTOFILL_RESPONSE_TIMEOUT = float(
+    SERVER_CONFIG["autofill"]["response_timeout"]
+)
+
 ALLOWED_HOSTS = {
     "youtube.com",
     "www.youtube.com",
@@ -151,6 +164,10 @@ class Room:
         self.anchor_position: float = 0.0   # second within the track at anchor_time
         self.anchor_time: float = time.time()
         self.clients: dict[ServerConnection, str] = {}
+        self.favorites_count: dict[ServerConnection, int] = {}
+        self.pending_autofill: dict[str, asyncio.Future] = {}
+        self.autofill_requester: dict[str, ServerConnection] = {}
+        self.autofill_in_progress = False
         self.advance_in_progress = False
 
     def live_position(self) -> float:
@@ -220,6 +237,8 @@ async def advance_with_grace(grace: float, reason: str = "auto"):
         track_id = room.current.id if room.current else None
 
         if track_id is None:
+            if AUTOFILL_ENABLED:
+                asyncio.create_task(autofill())
             return
 
         await asyncio.sleep(grace)
@@ -238,6 +257,101 @@ async def advance_with_grace(grace: float, reason: str = "auto"):
 
     finally:
         room.advance_in_progress = False
+
+
+async def autofill():
+    """Pick a random client with favorites and ask it for a random song."""
+    if room.autofill_in_progress or not AUTOFILL_ENABLED:
+        return
+
+    room.autofill_in_progress = True
+
+    try:
+        candidates = [
+            ws for ws, count in room.favorites_count.items()
+            if count > 0 and ws in room.clients
+        ]
+
+        if not candidates:
+            log.info("Autofill: no client with favorites connected")
+            return
+
+        random.shuffle(candidates)
+
+        for ws in candidates[:MAX_CLIENT_TRIES]:
+            name = room.clients.get(ws)
+            if name is None or ws not in room.clients:
+                continue
+
+            request_id = str(uuid.uuid4())[:8]
+            future = asyncio.get_running_loop().create_future()
+            room.pending_autofill[request_id] = future
+            room.autofill_requester[request_id] = ws
+
+            log.info("Autofill: asking %s to pick a song", name)
+
+            try:
+                await ws.send(json.dumps({
+                    "type": "autofill_request",
+                    "request_id": request_id,
+                }))
+            except Exception:
+                room.pending_autofill.pop(request_id, None)
+                room.autofill_requester.pop(request_id, None)
+                continue
+
+            try:
+                result = await asyncio.wait_for(future, AUTOFILL_RESPONSE_TIMEOUT)
+            except asyncio.TimeoutError:
+                future.cancel()
+                log.info("Autofill: no response from %s", name)
+                continue
+            finally:
+                room.pending_autofill.pop(request_id, None)
+                room.autofill_requester.pop(request_id, None)
+
+            if not isinstance(result, dict) or not result.get("ok"):
+                log.info("Autofill: %s failed to deliver a track", name)
+                continue
+
+            url = (result.get("url") or "").strip()
+            if not validate_url(url):
+                log.info("Autofill: %s sent an invalid URL", name)
+                continue
+
+            title = sanitize_text(result.get("title"), MAX_TITLE_LENGTH) or url
+            duration = validate_duration(result.get("duration"))
+            if duration is None:
+                log.info("Autofill: invalid duration from %s", name)
+                continue
+
+            started_urls = {t.url for t in room.queue}
+            if room.current:
+                started_urls.add(room.current.url)
+            if url in started_urls:
+                log.info("Autofill: %s already queued/playing, skipping", url)
+                continue
+
+            # A human filled the queue meanwhile: keep out of the way.
+            if room.queue or room.current is not None:
+                log.info("Autofill: the queue is not empty anymore, skipping")
+                continue
+
+            track = Track(
+                id=str(uuid.uuid4())[:8], url=url, title=title,
+                duration=duration,
+                added_by=f"{name} 🎲",
+            )
+            room.queue.append(track)
+            room.advance()
+            log.info("Autofill: playing '%s' picked by %s", track.title, name)
+            await broadcast()
+            return
+
+        log.info("Autofill: no client delivered a track")
+
+    finally:
+        room.autofill_in_progress = False
 
 
 async def watchdog():
@@ -270,7 +384,12 @@ async def handler(ws: ServerConnection):
             if mtype == "hello":
                 name = sanitize_text(msg.get("name") or name, MAX_NAME_LENGTH) or name
                 room.clients[ws] = name
-                log.info("%s joined", name)
+                try:
+                    fav_count = max(0, int(msg.get("favorites_count", 0)))
+                except (TypeError, ValueError):
+                    fav_count = 0
+                room.favorites_count[ws] = fav_count
+                log.info("%s joined (%d favorites)", name, fav_count)
                 await ws.send(json.dumps(room.state_message()))
                 await broadcast()
 
@@ -354,11 +473,25 @@ async def handler(ws: ServerConnection):
             elif mtype == "ping":
                 await ws.send(json.dumps({"type": "pong", "t0": msg.get("t0"), "server_time": time.time()}))
 
+            elif mtype == "autofill_result":
+                request_id = msg.get("request_id")
+                future = room.pending_autofill.get(request_id)
+                if future is not None and not future.done():
+                    future.set_result(msg)
+
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
         last_add_time.pop(ws, None)
         left = room.clients.pop(ws, None)
+        room.favorites_count.pop(ws, None)
+        for request_id, ws_for in list(room.autofill_requester.items()):
+            if ws_for == ws:
+                future = room.pending_autofill.get(request_id)
+                if future is not None and not future.done():
+                    future.set_exception(asyncio.TimeoutError())
+                room.pending_autofill.pop(request_id, None)
+                room.autofill_requester.pop(request_id, None)
         if left:
             log.info("%s left", left)
             await broadcast()

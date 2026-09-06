@@ -115,12 +115,42 @@ max_duration_seconds = 21600
 
 add_cooldown_seconds = 2.0
 
+[server.autofill]
+enabled = true
+max_client_tries = 2
+response_timeout = 45.0
+
 [client]
 clock_sync_interval = 20.0
 ticker_interval = 1.0
+
+[client.autofill]
+max_url_tries = 3
 ```
 
 Configuration files are preserved when Syncatuna is updated, so user settings are not overwritten by new releases.
+
+## Autofill
+
+When the queue runs empty (a song ends or `next` is used with nothing else queued), the server can pick a random connected client to supply the next song automatically.
+
+Each client that keeps a `favorites.txt` in its Syncatuna config directory is eligible to be chosen:
+
+```text
+~/.config/syncatuna/favorites.txt
+```
+
+> CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_NAME"
+
+The file holds one YouTube URL per line. Blank lines and lines starting with `#` are ignored, and duplicate URLs are skipped.
+
+At connect time the client tells the server how many favorites it has (the server never sees the URLs themselves). When the queue runs out, the server:
+
+1. picks a client at random from those with favorites,
+2. asks it to pick one of its URLs and resolve it with its own `yt-dlp` and
+3. queues the result.
+
+If a track fails to resolve, the client tries other URLs from its list (up to `[client] autofill.max_url_tries`), and if all of them fail the server moves on to another client (up to `[server] autofill.max_client_tries`). Autofill can be disabled with `[server] autofill.enabled = false`.
 
 ## `yt-dlp` Configuration
 
