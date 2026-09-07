@@ -391,17 +391,15 @@ async def apply_state(msg, mpv: MPV):
                 not state.playing
             )
 
-    #nininini
-    if track_changed or queue_changed or users_changed:
-        announcements = None
-        if added_ids:
-            all_known = list(state.queue) + ([state.current] if state.current else [])
-            added_tracks = [t for t in all_known if t["id"] in added_ids]
-            announcements = [f"{t['added_by']} added: {t['title']}" for t in added_tracks]
-        try:
-            emit(render_dashboard(announcements=announcements, clear=bool(added_ids)))
-        except Exception:
-            pass
+    announcements = None
+    if added_ids:
+        all_known = list(state.queue) + ([state.current] if state.current else [])
+        added_tracks = [t for t in all_known if t["id"] in added_ids]
+        announcements = [f"{t['added_by']} added: {t['title']}" for t in added_tracks]
+    try:
+        emit(render_dashboard(announcements=announcements, clear=True))
+    except Exception:
+        pass
 
 
 def fmt_time(seconds) -> str:
