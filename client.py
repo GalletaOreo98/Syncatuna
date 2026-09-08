@@ -15,9 +15,14 @@ import time
 import websockets
 
 try:
-    from prompt_toolkit import PromptSession, print_formatted_text
-    from prompt_toolkit.patch_stdout import patch_stdout
+    from prompt_toolkit import Application
+    from prompt_toolkit.buffer import Buffer
     from prompt_toolkit.formatted_text import ANSI
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout.containers import HSplit, VSplit, Window
+    from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+    from prompt_toolkit.layout.layout import Layout
+    from prompt_toolkit.patch_stdout import patch_stdout
 except ImportError:
     print("Missing prompt_toolkit. Install it with: pip install --user prompt_toolkit")
     sys.exit(1)
@@ -43,11 +48,34 @@ MAX_URL_TRIES = int(
     CLIENT_CONFIG["autofill"]["max_url_tries"]
 )
 
-session = PromptSession()
+_app: "Application | None" = None
+
+MESSAGE_TIMEOUT = 8.0
+ANNOUNCEMENT: "list[float | str | None]" = [None, None]
+STATUS_MESSAGE: "list[float | str | None]" = [None, None, "yellow"]
 
 
-def emit(text: str):
-    print_formatted_text(ANSI(text))
+def invalidate_ui():
+    if _app is not None:
+        try:
+            _app.invalidate()
+        except Exception:
+            pass
+
+
+def emit(text: str, color: str = "yellow"):
+    now = time.time()
+    STATUS_MESSAGE[0] = now
+    STATUS_MESSAGE[1] = text
+    STATUS_MESSAGE[2] = color
+    invalidate_ui()
+
+
+def announce(text: str):
+    now = time.time()
+    ANNOUNCEMENT[0] = now
+    ANNOUNCEMENT[1] = text
+    invalidate_ui()
 
 
 def fetch_metadata_local(url: str, quiet: bool = False) -> dict:
@@ -228,10 +256,20 @@ async def apply_new_track(mpv: MPV, track_id: str, url: str):
         return
 
 
-DASHBOARD_WIDTH = 62
+def dashboard_width() -> int:
+    import shutil
+    columns = 0
+    if _app is not None:
+        try:
+            columns = _app.output.get_size().columns
+        except Exception:
+            columns = 0
+    if columns <= 0:
+        columns = shutil.get_terminal_size(fallback=(80, 24)).columns
+    return max(20, min(columns, 110))
 
 
-def render_dashboard(announcements: "list[str] | None" = None, clear: bool = False) -> str:
+def render_dashboard() -> str:
     import io as _io
     from rich.console import Console, Group
     from rich.panel import Panel
@@ -240,11 +278,13 @@ def render_dashboard(announcements: "list[str] | None" = None, clear: bool = Fal
 
     from rich.cells import cell_len
 
+    width = dashboard_width()
+
     left = f"🟢 Connected ({len(state.users)})"
     right = f"⭐ {count_favorites()}"
     # Keep the row below the panel's wrap threshold: a line that lands exactly
     # on the interior edge with a wide char folds its last cell by the panel.
-    pad = max(1, DASHBOARD_WIDTH - 4 - cell_len(left) - cell_len(right))
+    pad = max(1, width - 4 - cell_len(left) - cell_len(right))
     connected = Text()
     connected.append(left)
     connected.append(" " * pad)
@@ -281,23 +321,19 @@ def render_dashboard(announcements: "list[str] | None" = None, clear: bool = Fal
     group = Group(connected, now_playing, Rule(style="dim"), queue_text)
 
     buf = _io.StringIO()
-    console = Console(file=buf, force_terminal=True, color_system="256", width=DASHBOARD_WIDTH)
+    console = Console(file=buf, force_terminal=True, color_system="256", width=width)
 
-    if clear:
-        import shutil
-        term_lines = shutil.get_terminal_size(fallback=(80, 24)).lines
-        console.print("\n" * term_lines, end="")
-    if announcements:
-        for line in announcements:
-            console.print(Text(f"+ {line}", style="green"))
-        console.print()  # linea en blanco entre los avisos y el panel
+    now = time.time()
+    if ANNOUNCEMENT[1] is not None and now - float(ANNOUNCEMENT[0]) <= MESSAGE_TIMEOUT:
+        console.print(Text(f"+ {ANNOUNCEMENT[1]}", style="green"), overflow="fold")
+        console.print()
 
     console.print(Panel(
         group,
         title="🐱 Syncatuna 🐱",
         subtitle="URL=add · n=next · p=pause · r=resume · q=quit",
-        subtitle_align="left",
-        width=DASHBOARD_WIDTH,
+        subtitle_align="center",
+        width=width,
     ))
     return buf.getvalue()
 
@@ -391,15 +427,12 @@ async def apply_state(msg, mpv: MPV):
                 not state.playing
             )
 
-    announcements = None
     if added_ids:
         all_known = list(state.queue) + ([state.current] if state.current else [])
         added_tracks = [t for t in all_known if t["id"] in added_ids]
-        announcements = [f"{t['added_by']} added: {t['title']}" for t in added_tracks]
-    try:
-        emit(render_dashboard(announcements=announcements, clear=True))
-    except Exception:
-        pass
+        for t in added_tracks:
+            announce(f"{t['added_by']} added: {t['title']}")
+    invalidate_ui()
 
 
 def fmt_time(seconds) -> str:
@@ -420,39 +453,94 @@ def bottom_toolbar():
 
 
 def print_help():
-    emit(render_dashboard())
+    emit("URL=add · n=next · p=pause · r=resume · q=quit · paste a URL to add it")
 
 
-async def input_loop(ws):
-    while True:
-        try:
-            line = await session.prompt_async("> ", bottom_toolbar=bottom_toolbar,
-                                               refresh_interval=TICKER_INTERVAL)
-        except (EOFError, KeyboardInterrupt):
-            return  # Ctrl+D / Ctrl+C en el prompt: deja que main() limpie mpv
-        line = line.strip()
-        if not line:
-            continue
-        if line in ("q", "quit"):
-            return
-        elif line in ("n", "next"):
-            await ws.send(json.dumps({"type": "next"}))
-        elif line in ("p", "pause"):
-            await ws.send(json.dumps({"type": "pause"}))
-        elif line in ("r", "resume", "play"):
-            await ws.send(json.dumps({"type": "resume"}))
-        elif line in ("h", "help", "?"):
-            print_help()
-        elif line.startswith("http"):
-            emit("… resolving with yt-dlp")
-            meta = await asyncio.to_thread(fetch_metadata_local, line)
-            if meta is not None:
-                await ws.send(json.dumps({
-                    "type": "add", "url": line,
-                    "title": meta["title"], "duration": meta["duration"],
-                }))
-        else:
-            print("Unrecognized command. Type 'h' for help.")
+async def handle_command(line: str, ws):
+    line = line.strip()
+    if not line:
+        return False
+    if line in ("q", "quit"):
+        return True
+    elif line in ("n", "next"):
+        await ws.send(json.dumps({"type": "next"}))
+    elif line in ("p", "pause"):
+        await ws.send(json.dumps({"type": "pause"}))
+    elif line in ("r", "resume", "play"):
+        await ws.send(json.dumps({"type": "resume"}))
+    elif line in ("h", "help", "?"):
+        print_help()
+    elif line.startswith("http"):
+        emit("… resolving with yt-dlp")
+        meta = await asyncio.to_thread(fetch_metadata_local, line)
+        if meta is not None:
+            await ws.send(json.dumps({
+                "type": "add", "url": line,
+                "title": meta["title"], "duration": meta["duration"],
+            }))
+    else:
+        emit("Unrecognized command. Type 'h' for help.", color="red")
+    return False
+
+
+def dashboard_body():
+    try:
+        return ANSI(render_dashboard())
+    except Exception:
+        return "dashboard error"
+
+
+def status_body():
+    if STATUS_MESSAGE[1] is None or time.time() - float(STATUS_MESSAGE[0]) > MESSAGE_TIMEOUT:
+        return ""
+    color = "\x1b[31m" if STATUS_MESSAGE[2] == "red" else "\x1b[33m"
+    text = str(STATUS_MESSAGE[1])
+    return ANSI(f"{color}{text}\x1b[0m")
+
+
+def build_app(ws) -> "Application":
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    async def _on_enter(event):
+        text = event.current_buffer.text
+        event.current_buffer.reset()
+        if await handle_command(text, ws):
+            event.app.exit()
+
+    @kb.add("c-c")
+    @kb.add("c-d")
+    async def _on_quit(event):
+        event.app.exit()
+
+    buffer = Buffer()
+
+    layout = Layout(HSplit([
+        Window(FormattedTextControl(dashboard_body), always_hide_cursor=True),
+        Window(FormattedTextControl(status_body), height=1, always_hide_cursor=True),
+        VSplit([
+            Window(FormattedTextControl("> "), width=2, height=1,
+                   dont_extend_width=True),
+            Window(BufferControl(buffer=buffer), height=1),
+        ]),
+        Window(FormattedTextControl(bottom_toolbar), height=1, style="reverse"),
+    ]))
+
+    return Application(
+        layout=layout,
+        key_bindings=kb,
+        full_screen=True,
+        erase_when_done=True,
+    )
+
+
+async def ticker(app):
+    try:
+        while True:
+            await asyncio.sleep(TICKER_INTERVAL)
+            app.invalidate()
+    except asyncio.CancelledError:
+        pass
 
 
 def install_shutdown_handlers(mpv: MPV):
@@ -477,18 +565,24 @@ async def main(argv=None):
     mpv.start()
     install_shutdown_handlers(mpv)
 
+    global _app
     try:
         with patch_stdout():
             async with websockets.connect(url) as ws:
                 await ws.send(json.dumps({"type": "hello", "name": name,
                                           "favorites_count": count_favorites()}))
+                app = build_app(ws)
+                _app = app
+                ticker_task = asyncio.create_task(ticker(app))
                 asyncio.create_task(clock_sync_loop(ws))
                 recv_task = asyncio.create_task(receiver(ws, mpv))
                 try:
-                    await input_loop(ws)
+                    await app.run_async()
                 finally:
                     recv_task.cancel()
+                    ticker_task.cancel()
     finally:
+        _app = None
         mpv.stop()
 
     return 0
