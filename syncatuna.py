@@ -10,7 +10,7 @@ import client
 import favorites
 import server
 
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 
 
 def build_parser() -> argparse.ArgumentParser:
